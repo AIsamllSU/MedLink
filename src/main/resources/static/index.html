@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>发票退费</title>
+    <style>
+        body { max-width: 1000px; margin: 32px auto; padding: 0 16px; font-family: sans-serif; color: #222; }
+        form { display: flex; gap: 8px; margin: 20px 0; }
+        input, button { padding: 8px 12px; }
+        input[type="number"] { width: 80px; }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+        th, td { padding: 10px; border: 1px solid #ddd; text-align: left; }
+        #message { min-height: 24px; }
+        #submit-refund { margin-top: 16px; }
+    </style>
+</head>
+<body>
+<h1>发票退费</h1>
+<form id="lookup-form">
+    <label for="invoice-no">发票编号</label>
+    <input id="invoice-no" name="invoiceNo" required>
+    <button type="submit">查询</button>
+</form>
+<p id="message" role="status"></p>
+<section id="refund-section" hidden>
+    <p id="invoice-info"></p>
+    <table>
+        <thead>
+        <tr><th>选择</th><th>项目</th><th>规格</th><th>单价</th><th>可退数量</th><th>本次退费数量</th><th>金额</th></tr>
+        </thead>
+        <tbody id="refund-items"></tbody>
+    </table>
+    <p>本次退费合计：<strong id="refund-total">0.00</strong> 元</p>
+    <button id="submit-refund" type="button">提交退费</button>
+</section>
+<script>
+    const lookupForm = document.getElementById("lookup-form");
+    const message = document.getElementById("message");
+    const refundSection = document.getElementById("refund-section");
+    const itemBody = document.getElementById("refund-items");
+    let preparedRefund = null;
+
+    function updateTotal() {
+        let total = 0;
+        itemBody.querySelectorAll("tr").forEach((row) => {
+            const checkbox = row.querySelector("input[type=checkbox]");
+            const quantity = Number(row.querySelector("input[type=number]").value) || 0;
+            const unitPrice = Number(row.dataset.price);
+            const amount = checkbox.checked ? unitPrice * quantity : 0;
+            row.querySelector(".amount").textContent = amount.toFixed(2);
+            total += amount;
+        });
+        document.getElementById("refund-total").textContent = total.toFixed(2);
+    }
+
+    lookupForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        refundSection.hidden = true;
+        message.textContent = "正在查询…";
+        const invoiceNo = document.getElementById("invoice-no").value.trim();
+        try {
+            const response = await fetch(`/api/refund/prepare?invoiceNo=${encodeURIComponent(invoiceNo)}`);
+            const result = await response.json();
+            if (!response.ok || result.code !== 200) {
+                throw new Error(result.message || "查询失败");
+            }
+            preparedRefund = result.data;
+            itemBody.replaceChildren();
+            preparedRefund.items.forEach((item) => {
+                const row = document.createElement("tr");
+                row.dataset.price = item.priceAfter || 0;
+                const values = [item.name, item.spec || "", Number(item.priceAfter || 0).toFixed(2), item.refundable, ""];
+                const checkboxCell = document.createElement("td");
+                const checkbox = document.createElement("input");
+                checkbox.type = "checkbox";
+                checkboxCell.append(checkbox);
+                row.append(checkboxCell);
+                values.slice(0, 4).forEach((value) => {
+                    const cell = document.createElement("td");
+                    cell.textContent = value;
+                    row.append(cell);
+                });
+                const quantityCell = document.createElement("td");
+                const quantity = document.createElement("input");
+                quantity.type = "number";
+                quantity.min = "1";
+                quantity.max = String(item.refundable);
+                quantity.value = "1";
+                quantity.disabled = true;
+                quantityCell.append(quantity);
+                row.append(quantityCell);
+                const amountCell = document.createElement("td");
+                amountCell.className = "amount";
+                amountCell.textContent = "0.00";
+                row.append(amountCell);
+                checkbox.addEventListener("change", () => {
+                    quantity.disabled = !checkbox.checked;
+                    updateTotal();
+                });
+                quantity.addEventListener("input", updateTotal);
+                itemBody.append(row);
+            });
+            document.getElementById("invoice-info").textContent =
+                `发票：${preparedRefund.invoiceNo}（${preparedRefund.invoiceStatus}），退费单：${preparedRefund.refundOrderId}`;
+            message.textContent = "";
+            refundSection.hidden = false;
+            updateTotal();
+        } catch (error) {
+            message.textContent = error.message;
+        }
+    });
+
+    document.getElementById("submit-refund").addEventListener("click", async () => {
+        if (!preparedRefund) return;
+        const items = [];
+        itemBody.querySelectorAll("tr").forEach((row, index) => {
+            if (row.querySelector("input[type=checkbox]").checked) {
+                items.push({
+                    chargeItemId: preparedRefund.items[index].chargeItemId,
+                    refundQty: Number(row.querySelector("input[type=number]").value)
+                });
+            }
+        });
+        if (!items.length || items.some((item) => !Number.isInteger(item.refundQty) || item.refundQty <= 0)) {
+            message.textContent = "请选择项目并填写有效的退费数量";
+            return;
+        }
+        try {
+            const response = await fetch("/api/refund", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ refundOrderId: preparedRefund.refundOrderId, items })
+            });
+            const result = await response.json();
+            if (!response.ok || result.code !== 200) {
+                throw new Error(result.message || "退费提交失败");
+            }
+            message.textContent = "退费成功";
+            refundSection.hidden = true;
+            preparedRefund = null;
+        } catch (error) {
+            message.textContent = error.message;
+        }
+    });
+</script>
+</body>
+</html>
